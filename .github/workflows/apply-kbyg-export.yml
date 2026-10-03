@@ -1,0 +1,83 @@
+name: Apply KBYG Rise export
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '*.zip'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-export:
+    if: ${{ !contains(github.event.head_commit.message, '[apply-kbyg]') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Locate and validate uploaded Rise export
+        id: export
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name '*.zip' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
+          if [ -z "${ZIP:-}" ] || [ ! -f "$ZIP" ]; then
+            echo "No ZIP export found at the repository root."
+            exit 1
+          fi
+
+          TMP="$(mktemp -d)"
+          unzip -q "$ZIP" -d "$TMP"
+
+          if [ ! -f "$TMP/content/index.html" ] || [ ! -f "$TMP/content/runtime-data.js" ] || [ ! -d "$TMP/content/lib" ]; then
+            echo "ZIP is not the expected Rise web export structure (content/index.html, content/runtime-data.js, content/lib)."
+            exit 1
+          fi
+
+          if ! grep -q '2026 Civic Connection' "$TMP/content/index.html"; then
+            echo "The uploaded export does not identify itself as 2026 Civic Connection."
+            exit 1
+          fi
+
+          VERSION="$(grep -oE 'course package version: [A-Za-z0-9_-]+' "$TMP/content/index.html" | head -1 | sed 's/course package version: //')"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "tmp=$TMP" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Replace hosted course files
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP='${{ steps.export.outputs.zip }}'
+          TMP='${{ steps.export.outputs.tmp }}'
+
+          # Remove the prior Rise web export while preserving repository documentation,
+          # .nojekyll, GitHub configuration, and this updater workflow.
+          rm -rf assets lib index.html runtime-data.js
+          cp -a "$TMP/content/." .
+          rm -f "$ZIP"
+
+          # Confirm the copied package is structurally complete before committing.
+          test -f index.html
+          test -f runtime-data.js
+          test -d lib
+
+      - name: Commit replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No changes to commit.'
+            exit 0
+          fi
+          git commit -m "Replace KBYG with Rise export ${{ steps.export.outputs.version }} [apply-kbyg]"
+          git push origin HEAD:main
